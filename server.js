@@ -179,7 +179,7 @@ app.get('/api/current_user', (req, res) => {
 // --> GOOGLE AUTH
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/' }), (req, res) => {
-  res.redirect('http://localhost:5173');
+res.redirect('https://homeserviceconnect.netlify.app')
 });
 
 // --> BOOKING ROUTE 📅 (Now Saves Email)
