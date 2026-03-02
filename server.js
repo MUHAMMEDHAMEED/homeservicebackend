@@ -11,17 +11,34 @@ require('dotenv').config();
 const app = express();
 
 // --- 1. MIDDLEWARE ---
+const allowedOrigins = [
+  'https://homeserviceconnect.netlify.app', // Your live site
+  'http://localhost:5173'                  // Your local development site
+];
+
 app.use(cors({
-  origin: 'https://homeserviceconnect.netlify.app',
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE']
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
-app.use(express.json());
 app.use(session({
-  secret: 'mysecretkey123',
+  secret: process.env.SESSION_SECRET || 'secret',
   resave: false,
-  saveUninitialized: true,
-  cookie: { secure: false }
+  saveUninitialized: false,
+  cookie: {
+    secure: true,      // 👈 Required for HTTPS (Render/Netlify)
+    sameSite: 'none',  // 👈 Required for cross-domain sessions
+    maxAge: 24 * 60 * 60 * 1000 
+  }
 }));
 app.use(passport.initialize());
 app.use(passport.session());
