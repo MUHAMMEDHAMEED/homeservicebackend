@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -6,59 +7,49 @@ const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const LocalStrategy = require('passport-local').Strategy;
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
-require('dotenv').config();
 
 const app = express();
 
 // --- 1. MIDDLEWARE ---
-const allowedOrigins = [
-  'https://homeserviceconnect.netlify.app', // Your live site
-  'http://localhost:5173'                  // Your local development site
-];
+app.use(express.json()); 
+app.use(express.urlencoded({ extended: true }));
 
+const localOrigins = ['http://localhost:5173', 'http://localhost:5174'];
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) === -1) {
-      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-      return callback(new Error(msg), false);
+    if (!origin || localOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('CORS Not Allowed'));
     }
-    return callback(null, true);
   },
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  credentials: true
 }));
+
 app.use(session({
   secret: process.env.SESSION_SECRET || 'secret',
   resave: false,
   saveUninitialized: false,
-  cookie: {
-    secure: true,      // 👈 Required for HTTPS (Render/Netlify)
-    sameSite: 'none',  // 👈 Required for cross-domain sessions
+  cookie: { 
+    secure: false, 
+    sameSite: 'lax',
     maxAge: 24 * 60 * 60 * 1000 
   }
 }));
+
 app.use(passport.initialize());
 app.use(passport.session());
 
 // --- 2. DATABASE ---
-// Comment out the old one just in case
-// mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/homeservice')
-
-// Paste your cloud link directly in the code (just for this test!)
 mongoose.connect(process.env.MONGO_URI)
-.then(() => console.log("✅ CLOUD MongoDB Connected!"))
-  .catch(err => console.log("❌ DB Error:", err));
+  .then(() => console.log("✅ MongoDB Connected Successfully"))
+  .catch(err => console.error("❌ DB Error:", err));
 
 // --- 3. MODELS ---
-
-// User Model
 const userSchema = new mongoose.Schema({
   googleId: String,
   name: String,
-  email: String,
+  email: { type: String, required: true },
   password: String,
   role: { type: String, default: 'client' }, 
   serviceCategory: String, 
@@ -68,34 +59,39 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// Booking Model (Updated with customerEmail)
 const bookingSchema = new mongoose.Schema({
   customer: String,
-  customerEmail: String, // 👈 ADDED THIS to link bookings to users
+  customerEmail: String,
+  customerRole: { type: String, default: 'client' }, // 👈 Tracking Role
   service: String,
   phone: String,
   date: String,
   address: String,
-  city: String,    // Used for location matching
+  city: String,    
   status: { type: String, default: 'pending' }, 
-  assignedWorkerId: String, // ID of worker
-  workerDetails: Object     // Store name/phone of worker
+  assignedWorkerId: String,
+  workerDetails: Object,
+  createdAt: { type: Date, default: Date.now }
 });
 const Booking = mongoose.model('Booking', bookingSchema);
 
-// --- 4. PASSPORT CONFIG (AUTH) ---
-
+// --- 4. PASSPORT CONFIG ---
+// --- 4. PASSPORT CONFIG ---
 passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
-  const user = await User.findById(id);
-  done(null, user);
+  try {
+    const user = await User.findById(id);
+    done(null, user);
+  } catch (err) {
+    done(err, null);
+  }
 });
 
-// Google Strategy
 passport.use(new GoogleStrategy({
+    // Calling variables from .env file
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: "/auth/google/callback"
+    callbackURL: "http://localhost:3001/auth/google/callback"
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
@@ -110,235 +106,179 @@ passport.use(new GoogleStrategy({
         await user.save();
       }
       return done(null, user);
-    } catch (err) {
-      return done(err);
-    }
+    } catch (err) { return done(err); }
   }
 ));
 
-// Local Strategy
 passport.use(new LocalStrategy({ usernameField: 'email' }, async (email, password, done) => {
   try {
     const user = await User.findOne({ email });
     if (!user) return done(null, false, { message: 'Email not found' });
     if (!user.password) return done(null, false, { message: 'Please login with Google' });
-
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return done(null, false, { message: 'Incorrect password' });
-
     return done(null, user);
-  } catch (err) {
-    return done(err);
-  }
+  } catch (err) { return done(err); }
 }));
 
 // --- 5. ROUTES ---
 
-// --> REGISTER CLIENT
-app.post('/api/register-client', async (req, res) => {
-  try {
-    const { name, email, password, phone } = req.body;
-    const existingUser = await User.findOne({ email });
-    if (existingUser) return res.status(400).json({ message: "Email already exists" });
-
-    // Hash password for security
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const newUser = new User({ 
-      name, email, password: hashedPassword, phone, 
-      role: 'client' 
+// AUTH
+app.post('/api/login', (req, res, next) => {
+  passport.authenticate('local', (err, user, info) => {
+    if (err) return res.status(500).json({ message: "Server Error" });
+    if (!user) return res.status(400).json({ message: info.message || "Login failed" });
+    req.logIn(user, (err) => {
+      if (err) return res.status(500).json({ message: "Session failed" });
+      return res.json(user);
     });
-    await newUser.save();
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ message: "Server Error" });
-  }
+  })(req, res, next);
 });
 
-// --> REGISTER WORKER
-app.post('/api/register-worker', async (req, res) => {
-  const { name, email, password, serviceCategory, phone, district, city } = req.body;
-  try {
-    const existingUser = await User.findOne({ email });
-    if (existingUser) return res.status(400).json({ message: "Email already exists" });
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    
-    const newWorker = new User({ 
-      name, email, password: hashedPassword, role: 'worker', 
-      serviceCategory, phone, district, city 
-    });
-    await newWorker.save();
-    res.json({ message: "Worker registered successfully!" });
-  } catch (err) {
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-// --> LOGIN
-app.post('/api/login', passport.authenticate('local'), (req, res) => {
-  res.json(req.user);
-});
-
-// --> LOGOUT
-app.get('/api/logout', (req, res) => {
+// ✅ Add '/api' to the route to match your frontend request
+app.get("/api/logout", (req, res, next) => {
   req.logout((err) => {
     if (err) return next(err);
-res.redirect('https://homeserviceconnect.netlify.app');
+    
+    // Completely clear the local session
+    req.session.destroy((err) => {
+      if (err) console.error("Session destroy error:", err);
+      res.clearCookie("connect.sid"); 
+      // Redirect back to your Vite home page
+      res.redirect("http://localhost:5173"); 
+    });
   });
 });
 
-// --> GET USER
 app.get('/api/current_user', (req, res) => {
   res.json(req.user || null);
 });
 
-// --> GOOGLE AUTH
-app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
-app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/' }), (req, res) => {
-res.redirect('https://homeserviceconnect.netlify.app')
+// --- Make sure these are NOT inside another app.get or app.post ---
+
+app.get('/auth/google', 
+  passport.authenticate('google', { scope: ['profile', 'email'] })
+);
+
+app.get('/auth/google/callback', 
+  passport.authenticate('google', { failureRedirect: 'http://localhost:5173' }), 
+  (req, res) => {
+    res.redirect('http://localhost:5173');
+  }
+);
+
+// REGISTRATION
+app.post('/api/register-client', async (req, res) => {
+  try {
+    const { name, email, password, phone } = req.body;
+    if (!name || !email || !password) return res.status(400).json({ message: "Fields required" });
+    const existingUser = await User.findOne({ email });
+    if (existingUser) return res.status(400).json({ message: "Email exists" });
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new User({ name, email, password: hashedPassword, phone, role: 'client' });
+    await newUser.save();
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ message: "Server Error" }); }
 });
 
-// --> BOOKING ROUTE 📅 (Now Saves Email)
-app.post('/api/book', async (req, res) => {
-  const { service, customer, email, phone, location, address, date } = req.body;
-
+app.post('/api/register-worker', async (req, res) => {
   try {
+    const { name, email, password, serviceCategory, phone, district, city } = req.body;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newWorker = new User({ name, email, password: hashedPassword, role: 'worker', serviceCategory, phone, district, city });
+    await newWorker.save();
+    res.json({ message: "Worker registered!" });
+  } catch (err) { res.status(500).json({ message: "Server error" }); }
+});
+
+// CLIENT BOOKINGS
+app.post('/api/book', async (req, res) => {
+  try {
+    const { service, customer, email, phone, address, date } = req.body;
+    const userRole = req.user ? req.user.role : 'client'; // 👈 Capture current role
+
     const newBooking = new Booking({
-      service, 
-      customer, 
-      customerEmail: email, // 👈 Save Email
-      phone, 
-      date, 
-      address,
-      city: (location || "").toLowerCase(), 
-      status: 'pending'
+      service, customer, customerEmail: email,
+      customerRole: userRole, // 👈 Save role
+      phone, date, address, status: 'pending'
     });
     await newBooking.save();
-
-    res.json({ message: "Booked", workerFound: 1 });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error" });
-  }
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ message: "Booking error" }); }
 });
 
-// --> CLIENT: Get My Bookings 📅 (New Route)
 app.get('/api/client/bookings', async (req, res) => {
-  const { email } = req.query; 
   try {
-    if (!email) return res.json([]);
-    // Find bookings for this email
-    const bookings = await Booking.find({ customerEmail: email }).sort({ _id: -1 });
-    res.json(bookings);
-  } catch (err) {
-    res.status(500).json({ message: "Error fetching bookings" });
-  }
+    const email = req.query.email;
+    const myBookings = await Booking.find({ customerEmail: email }).sort({ _id: -1 });
+    res.json(myBookings);
+  } catch (err) { res.status(500).json({ message: "Error" }); }
 });
 
-// --> WORKER: Get Jobs (Pending + Accepted) 🧠
-// --> WORKER: Get Jobs (Strict Filter) 🧠
-// --> WORKER: Get Jobs (Final Strict Fix) 🔒
+// WORKER ROUTES
+// server.js - Updated Worker Jobs Route
 app.get('/api/worker/jobs', async (req, res) => {
   const { category, workerId } = req.query; 
-
-  console.log(`🔎 Filtering for: ${category}`); // Check your terminal for this!
-
   try {
-    // 1. Get ALL Pending Jobs (Temporary)
-    const allPending = await Booking.find({ status: 'pending' });
+    // 🛡️ Find all pending jobs (new requests)
+    const pendingJobs = await Booking.find({ status: 'pending' });
 
-    // 2. 🛑 JAVASCRIPT FILTER (The "Foolproof" Check)
-    //    We manually check each job. If the service name doesn't match, we toss it out.
-    const filteredPending = allPending.filter(job => {
-      // Safety check: if job has no service name, hide it
-      if (!job.service) return false;
-      
-      // Compare names (Case Insensitive: "Plumber" == "plumber")
-      return job.service.toLowerCase().trim() === (category || "").toLowerCase().trim();
-    });
-
-    // 3. Get Jobs Assigned Specifically to ME (Accepted/Completed)
+    // 🛡️ Find all jobs specifically for this worker (Accepted AND Completed)
     const myJobs = await Booking.find({ assignedWorkerId: workerId });
 
-    // 4. Combine Both Lists
-    const finalJobs = [...filteredPending, ...myJobs].sort((a, b) => {
-      return new Date(b._id.getTimestamp()) - new Date(a._id.getTimestamp());
-    });
-
-    res.json(finalJobs);
-
+    // Combine them and send back to the frontend
+    res.json([...pendingJobs, ...myJobs].sort((a,b) => b._id.getTimestamp() - a._id.getTimestamp()));
   } catch (err) {
-    console.error("❌ Error fetching jobs:", err);
     res.status(500).json({ message: "Server Error" });
   }
 });
-// --> WORKER: Mark Completed ✅
+// server.js - Add this route
 app.post('/api/worker/complete', async (req, res) => {
-  const { bookingId } = req.body;
   try {
-    const booking = await Booking.findById(bookingId);
-    if (!booking) return res.status(404).json({ success: false, message: "Booking not found" });
-
-    booking.status = 'completed';
-    await booking.save();
-
+    const { bookingId } = req.body;
+    await Booking.findByIdAndUpdate(bookingId, { status: 'completed' });
     res.json({ success: true });
   } catch (err) {
     console.error("Complete Error:", err);
-    res.status(500).json({ success: false, message: "Server Error" });
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
-// --> ADMIN: Get All Data 👮‍♂️
+
+app.post('/api/worker/accept', async (req, res) => {
+  try {
+    const { bookingId, workerId } = req.body;
+    const worker = await User.findById(workerId);
+    await Booking.findByIdAndUpdate(bookingId, { 
+      status: 'accepted', assignedWorkerId: workerId,
+      workerDetails: { name: worker.name, phone: worker.phone }
+    });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ message: "Error" }); }
+});
+
+// ADMIN ROUTES
+app.get('/api/admin/bookings', async (req, res) => {
+  try {
+    if (!req.user || req.user.role !== 'admin') return res.status(401).json({ message: "Denied" });
+    const bookings = await Booking.find().sort({ createdAt: -1 });
+    res.json(bookings);
+  } catch (err) { res.status(500).json({ message: "Error" }); }
+});
+
 app.get('/api/admin/data', async (req, res) => {
   try {
     const users = await User.find().sort({ _id: -1 });
     const bookings = await Booking.find().sort({ _id: -1 });
-    
     res.json({ users, bookings });
-  } catch (err) {
-    res.status(500).json({ message: "Server Error" });
-  }
+  } catch (err) { res.status(500).json({ message: "Error" }); }
 });
 
-// --> ADMIN: Delete Booking 🗑️
-app.delete('/api/admin/booking/:id', async (req, res) => {
+app.delete('/api/admin/bookings/:id', async (req, res) => {
   try {
     await Booking.findByIdAndDelete(req.params.id);
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ message: "Error deleting" });
-  }
+  } catch (err) { res.status(500).json({ message: "Error" }); }
 });
-// --> WORKER: Accept a Job ✅ (PASTE THIS IN SERVER.JS)
-app.post('/api/worker/accept', async (req, res) => {
-  const { bookingId, workerId } = req.body;
-  
-  console.log(`📥 Accepting Job: ${bookingId} for Worker: ${workerId}`);
 
-  try {
-    // 1. Find the Worker to get their name/phone
-    const worker = await User.findById(workerId);
-    if (!worker) return res.status(404).json({ message: "Worker profile not found." });
-
-    // 2. Update the Booking
-    await Booking.findByIdAndUpdate(bookingId, { 
-      status: 'accepted',
-      assignedWorkerId: workerId,
-      workerDetails: {
-        name: worker.name,
-        phone: worker.phone
-      }
-    });
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error("❌ Accept Error:", err);
-    res.status(500).json({ message: "Server error while accepting job." });
-  }
-});
-// 👇 START THE SERVER
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-});
+const PORT = 3001;
+app.listen(PORT, () => console.log(`🚀 Local Server running on port ${PORT}`));
